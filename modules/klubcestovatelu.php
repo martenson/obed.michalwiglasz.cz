@@ -12,43 +12,73 @@ class KlubCestovatelu extends LunchMenuSource
 		$result = new LunchMenuResult($cached['stored']);
 
 		$content = $cached['html']->find("div.entry-content", 0);
-
-		$regexp = '(' . get_czech_day(date('w', $todayDate)) . '\s+' . date('j', $todayDate) . '\.)ui';
-
-		$pricearr = array();
-		$prices = $content->find("p strong", 0);
-		if ($prices && !$prices->prev_sibling() && !$prices->next_sibling()) {
-			$prices = explode('/', $prices->plaintext);
-			foreach ($prices as $price) {
-				$price = explode('&#8211;', $price);
-				$pricearr[] = trim(ltrim(str_replace("&nbsp;", "", $price[1]), "–"));
-			}
+		if (!$content) {
+			throw new ScrapingFailedException("div.entry-content not found");
 		}
 
-		$days = $content->find("h3");
-		foreach ($days as $day) {
-			if (!preg_match($regexp, $day->plaintext)) continue;
-
-			$soup = $day->next_sibling();
-			$menu = $soup->next_sibling();
-			while ($menu && $menu->tag != "ol") {
-				$menu = $menu->next_sibling();
-			}
-
-			if ($soup && $soup->tag == 'p' && trim(str_replace("\xc2\xa0", ' ', html_entity_decode($soup->plaintext))) != NULL) {
-				$result->dishes[] = new Dish(html_entity_decode($soup->plaintext));
-			}
-
-			if ($menu && $menu->tag == 'ol') {
-				$num = 1;
-				foreach ($menu->find('li') as $dish) {
-					$what = html_entity_decode($dish->plaintext);
-					$price = isset($pricearr[$num-1]) ? $pricearr[$num-1] : NULL;
-					$result->dishes[] = new Dish($what, $price, NULL, NULL, $num++);
-				}
-			}
+		$iframe = $content->find("iframe#menu-frame", 0);
+		if (!$iframe) {
+			throw new ScrapingFailedException("iframe#menu-frame not found");
 		}
 
+		$iframeUrl = html_entity_decode($iframe->src, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+		if (strpos($iframeUrl, '//') === 0) {
+			$iframeUrl = 'https:' . $iframeUrl;
+		} elseif (strpos($iframeUrl, 'http') !== 0) {
+			$iframeUrl = rtrim($this->link, '/') . '/' . ltrim($iframeUrl, '/');
+		}
+
+		$menu = cache_get_html($this->title . ' iframe', $iframeUrl, $cacheSourceExpires);
+		if (!$menu['html']) {
+			throw new ScrapingFailedException("iframe menu not loaded");
+		}
+
+		$this->processEmbeddedMenu($result, $menu['html'], $todayDate);
 		return $result;
+	}
+
+	protected function processEmbeddedMenu(&$result, $html, $todayDate)
+	{
+		$dayName = get_czech_day(date('w', $todayDate));
+		$dayBlock = null;
+		foreach ($html->find('div.day-block') as $block) {
+			$name = $this->normalizeText($block->find('span.day-name', 0)->plaintext);
+			if (mb_strtolower($name) == $dayName) {
+				$dayBlock = $block;
+				break;
+			}
+		}
+
+		if (!$dayBlock) {
+			throw new ScrapingFailedException("today's day-block not found");
+		}
+
+		$prices = array();
+		foreach ($html->find('span.price-item strong') as $priceItem) {
+			$text = $this->normalizeText($priceItem->plaintext);
+			if (preg_match('/Menu\s+č\.\s*([0-9]+)\s*[–-]\s*(.+)$/ui', $text, $m)) {
+				$prices[(int)$m[1]] = trim($m[2]);
+			}
+		}
+
+		$soup = $dayBlock->find('span.soup-name', 0);
+		if ($soup) {
+			$result->dishes[] = new Dish($this->normalizeText($soup->plaintext));
+		}
+
+		foreach ($dayBlock->find('li.dish-item') as $dish) {
+			$number = $this->normalizeText($dish->find('span.dish-num', 0)->plaintext);
+			$number = trim($number, '.');
+			$what = $this->normalizeText($dish->find('span.dish-name', 0)->plaintext);
+			$price = isset($prices[(int)$number])? $prices[(int)$number] : NULL;
+			$result->dishes[] = new Dish($what, $price, NULL, NULL, $number);
+		}
+	}
+
+	protected function normalizeText($text)
+	{
+		$text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+		$text = preg_replace('/\s+/u', ' ', $text);
+		return trim($text);
 	}
 }
