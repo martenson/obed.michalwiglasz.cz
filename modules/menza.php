@@ -8,15 +8,20 @@ class Menza extends LunchMenuSource {
 
 	public function getTodaysMenu($todayDate, $cacheSourceExpires)
 	{
-		$cached = $this->downloadHtml($cacheSourceExpires);
+		$cached = $this->downloadRaw($cacheSourceExpires);
 		$result = new LunchMenuResult($cached['stored']);
 		$group = null;
 
-		$table = $cached['html']->find("table#m5", 0);
-
-		if (!$table) {
+		if (!preg_match('/<table\b[^>]*\bid=["\']m5["\'][^>]*>.*?<\/table>/is', $cached['contents'], $m)) {
 			throw new ScrapingFailedException("table#m5 was not found");
 		}
+
+		$tableHtml = str_get_html($m[0]);
+		if (!$tableHtml) {
+			throw new ScrapingFailedException("table#m5 could not be parsed");
+		}
+
+		$table = $tableHtml->find("table#m5", 0);
 
 		$mapping = array(
 			"td.levy" => "type",
@@ -28,13 +33,25 @@ class Menza extends LunchMenuSource {
 
 		foreach ($table->find("tr") as $i => $row) {
 
-			$values = array_fill_keys(array_keys($mapping), 0);
+			$values = array(
+				"type" => "",
+				"name" => "",
+				"priceStudent" => "",
+				"priceEmployee" => "",
+				"priceExternal" => "",
+			);
 			foreach ($mapping as $selector => $key) {
-				$element = $row->find($selector);
+				if ($key == 'name') {
+					$element = $this->findCzechName($row);
+				} else {
+					$element = $row->find($selector, 0);
+				}
 				if ($element) {
-					$value = $element[0]->plaintext;
-					$value = preg_replace('/&nbsp;/i', ' ', $value);
-					$values[$key] = $value;
+					$text = $element->plaintext;
+					if ($key == 'name') {
+						$text = preg_replace('/<small\b[^>]*>.*?<\/small>/is', '', $element->innertext);
+					}
+					$values[$key] = $this->normalizeText($text);
 				}
 			}
 
@@ -57,10 +74,31 @@ class Menza extends LunchMenuSource {
 				"Externí stravník" => $values["priceExternal"],
 			);
 
-			$result->dishes[] = new Dish($values["name"], $price, null, $group);
+			$result->dishes[] = new Dish($values["name"], $price, '', $group, '');
 		}
 
 		return $result;
 
+	}
+
+	protected function findCzechName($row)
+	{
+		$fallback = null;
+		foreach ($row->find('td.levyjid') as $element) {
+			if (!$fallback) {
+				$fallback = $element;
+			}
+			if (strpos($element->class, 'jjjaz1jjj') !== FALSE) {
+				return $element;
+			}
+		}
+		return $fallback;
+	}
+
+	protected function normalizeText($text)
+	{
+		$text = strip_tags(html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+		$text = preg_replace('/\s+/u', ' ', $text);
+		return trim($text);
 	}
 }
